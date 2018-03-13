@@ -9,6 +9,7 @@
 #include <iostream>
 #include <amp.h>
 #include <amp_math.h>
+#include <array>
 
 // Import things we need from the standard library
 using std::chrono::duration_cast;
@@ -23,8 +24,9 @@ typedef std::chrono::steady_clock the_clock;
 
 
 // The size of the image to generate.
-const int WIDTH = 2560;
-const int HEIGHT = 1440;
+const int WIDTH = 640;
+const int HEIGHT = 480;
+const int RES = WIDTH * HEIGHT;
 
 // The number of times to iterate before we assume that a point isn't in the
 // Mandelbrot set.
@@ -34,7 +36,8 @@ const int MAX_ITERATIONS = 4000;
 // The image data.
 // Each pixel is represented as 0xRRGGBB.
 //uint32_t image[HEIGHT][WIDTH];
-std::vector<std::vector<uint32_t>> image(HEIGHT, std::vector<uint32_t>(WIDTH));
+std::array<uint32_t, RES> image;
+//std::vector<std::vector<uint32_t>> image(HEIGHT, std::vector<uint32_t>(WIDTH));
 
 
 // using our own structure as Complex function not available in the Concurrency namespace
@@ -94,10 +97,12 @@ void write_tga(const char *filename)
 	{
 		for (int x = 0; x < WIDTH; ++x)
 		{
+			int loc = (y * WIDTH) + x;
+
 			uint8_t pixel[3] = {
-				image[y][x] & 0xFF, // blue channel
-				(image[y][x] >> 8) & 0xFF, // green channel
-				(image[y][x] >> 16) & 0xFF, // red channel
+				image[loc] & 0xFF, // blue channel
+				(image[loc] >> 8) & 0xFF, // green channel
+				(image[loc] >> 16) & 0xFF, // red channel
 			};
 			outfile.write((const char *)pixel, 3);
 		}
@@ -115,56 +120,54 @@ void write_tga(const char *filename)
 
 // Render the Mandelbrot set into the image array.
 // The parameters specify the region on the complex plane to plot.
-void compute_mandelbrot(float left, float right, float top, float bottom, std::vector<std::vector<uint32_t>> &img)
+void compute_mandelbrot(float left, float right, float top, float bottom, std::array<uint32_t, RES>& img)
 {
-	for (int y = 0; y < HEIGHT; y++) {
+	concurrency::extent<2> e(HEIGHT, WIDTH);
+	concurrency::array_view<uint32_t, 2> smol_brot(e, img);
+	smol_brot.discard_data();
 
-		concurrency::extent<2> e(WIDTH, 1);
-		concurrency::array_view<uint32_t, 2> smol_brot(e, img.at(y));
-		smol_brot.discard_data();
+	try {
+		concurrency::parallel_for_each(smol_brot.extent, [=](concurrency::index<2> idx) restrict(amp) {
+			int x = idx[1];
+			int y = idx[0];
 
-		try {
-			concurrency::parallel_for_each(smol_brot.extent, [=](concurrency::index<2> idx) restrict(amp) {
-				int x = idx[0];
+			// Work out the point in the complex plane that
+			// corresponds to this pixel in the output image.
+			Complex1 c = { left + (x * (right - left) / WIDTH), top + (y * (bottom - top) / HEIGHT) };
 
-				// Work out the point in the complex plane that
-				// corresponds to this pixel in the output image.
-				Complex1 c = { left + (x * (right - left) / WIDTH), top + (y * (bottom - top) / HEIGHT) };
+			// Start off z at (0, 0).
+			Complex1 z = {0.0, 0.0};
 
-				// Start off z at (0, 0).
-				Complex1 z = {0.0, 0.0};
+			// Iterate z = z^2 + c until z moves more than 2 units
+			// away from (0, 0), or we've iterated too many times.
+			int iterations = 0;
+			while (c_abs(z) < 2.0 && iterations < MAX_ITERATIONS)
+			{
+				z = c_add(c_mul(z, z), c);
 
-				// Iterate z = z^2 + c until z moves more than 2 units
-				// away from (0, 0), or we've iterated too many times.
-				int iterations = 0;
-				while (c_abs(z) < 2.0 && iterations < MAX_ITERATIONS)
-				{
-					z = c_add(c_mul(z, z), c);
+				++iterations;
+			}
 
-					++iterations;
-				}
+			if (iterations == MAX_ITERATIONS)
+			{
+				// z didn't escape from the circle.
+				// This point is in the Mandelbrot set.
+				smol_brot[idx] = 0x000000; //black
+			}
+			else
+			{
+				// z escaped within less than MAX_ITERATIONS
+				// iterations. This point isn't in the set.
+				//smol_brot[1][x] = 0xFFFFFF; // white
+				int temp = iterations / 2;
 
-				if (iterations == MAX_ITERATIONS)
-				{
-					// z didn't escape from the circle.
-					// This point is in the Mandelbrot set.
-					smol_brot[1][x] = 0x000000; //black
-				}
-				else
-				{
-					// z escaped within less than MAX_ITERATIONS
-					// iterations. This point isn't in the set.
-					//smol_brot[1][x] = 0xFFFFFF; // white
-					int temp = iterations / 2;
+				smol_brot[idx] = (temp << 16) | (temp << 8) | temp; //grayscale
+			}
 
-					smol_brot[1][x] = (temp << 16) | (temp << 8) | temp; //grayscale
-				}
-
-			});
-		}
-		catch (const std::exception& ex) {
-			MessageBoxA(NULL, ex.what(), "Error", MB_ICONERROR);
-		}
+		});
+	}
+	catch (const std::exception& ex) {
+		MessageBoxA(NULL, ex.what(), "Error", MB_ICONERROR);
 	}
 }
 
